@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Steam Chase</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gochi+Hand&display=swap">
+<style>
+/* Layout: one full-bleed canvas — the yellow legal pad is the whole world, drawn in boiling biro ink */
+:root{
+  --paper:#f4efa3; --ink:#1d1d26; --rule:#9fb6d4; --redpen:#b8342a;
+  --hand:'Gochi Hand','Comic Sans MS','Chalkboard SE',cursive;
+  color-scheme:light;
+}
+html,body{height:100%;margin:0;padding:0;overflow:hidden;background:var(--paper);overscroll-behavior:none}
+canvas{display:block;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Steam Chase game. Tap above or below your ship to change lanes, or use the arrow keys."></canvas>
+<script>
+(()=>{
+const VERSION='v0.1';
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const css=getComputedStyle(document.documentElement);
+const PAPER=css.getPropertyValue('--paper').trim()||'#f4efa3';
+const INK=css.getPropertyValue('--ink').trim()||'#1d1d26';
+const RULE=css.getPropertyValue('--rule').trim()||'#9fb6d4';
+const RED=css.getPropertyValue('--redpen').trim()||'#b8342a';
+const HAND="'Gochi Hand','Comic Sans MS','Chalkboard SE',cursive";
+const LANES=[{y:.50,s:.55},{y:.67,s:.78},{y:.86,s:1}];
+const HOR=.34, SUN_T=80, RIVAL_V=9, BASE_V=12, BOOST_V=20, START_GAP=340;
+
+let W=0,H=0,DPR=1,U=1,PX=0,paper=null;
+let state='title',gap,v,boostT,hull,lane,laneF,obs,fx,spawnT,elapsed,shake=0,endInfo=null,lastEnd=0,time=0,scroll=0;
+let best=null; try{best=JSON.parse(localStorage.getItem('steamchase.best'));}catch(e){best=null;}
+const clouds=[{fx:.35,fy:.10,r:.9},{fx:.62,fy:.07,r:1.2},{fx:.82,fy:.12,r:1},{fx:1.05,fy:.20,r:.8}];
+
+// ---------- boiling ink ----------
+let tick=0,sc=0,JA=.9;
+function h(n){const s=Math.sin(n*127.1+tick*311.7)*43758.5453;return s-Math.floor(s);}
+function J(){return (h(++sc)-.5)*2*JA;}
+function pen(w,col){ctx.lineWidth=w;ctx.strokeStyle=col||INK;ctx.lineCap='round';ctx.lineJoin='round';}
+function wline(pts,closed,fill){
+  ctx.beginPath();let first=true;
+  const segs=closed?pts.length:pts.length-1;
+  for(let i=0;i<segs;i++){
+    const a=pts[i],b=pts[(i+1)%pts.length];
+    const n=Math.max(1,Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])/14));
+    for(let k=first?0:1;k<=n;k++){
+      const t=k/n,x=a[0]+(b[0]-a[0])*t+J(),y=a[1]+(b[1]-a[1])*t+J();
+      if(first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);
+    }
+  }
+  if(fill){ctx.fillStyle=fill;ctx.fill();}
+  ctx.stroke();
+}
+function wcirc(x,y,r,fill){
+  ctx.beginPath();const n=Math.max(10,r*.8|0),a0=h(++sc)*6.28;
+  for(let i=0;i<=n+1;i++){const a=a0+i/n*6.55,rr=r+J()*.7;const px=x+Math.cos(a)*rr,py=y+Math.sin(a)*rr;i?ctx.lineTo(px,py):ctx.moveTo(px,py);}
+  if(fill){ctx.fillStyle=fill;ctx.fill();}ctx.stroke();
+}
+function curl(x,y,s,n,ang){
+  ctx.beginPath();const a=s*.3,b=s*.55,ca=Math.cos(ang),sa=Math.sin(ang),steps=Math.round(n*16);
+  for(let i=0;i<=steps;i++){
+    const t=i/16*6.283,g=1+t/6.283*.25;
+    const lx=(a*t-b*Math.sin(t))*g,ly=-b*(1-Math.cos(t))*.8*g;
+    const X=x+lx*ca-ly*sa+J()*.5,Y=y+lx*sa+ly*ca+J()*.5;
+    i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);
+  }
+  ctx.stroke();
+}
+function txt(s,x,y,size,align,col,rot){
+  ctx.save();ctx.translate(x,y);if(rot)ctx.rotate(rot);
+  ctx.font=`${size}px ${HAND}`;ctx.textAlign=align||'center';ctx.textBaseline='middle';
+  ctx.fillStyle=col||INK;ctx.fillText(s,0,0);ctx.restore();
+}
+
+// ---------- layout ----------
+function resize(){
+  DPR=Math.min(2,window.devicePixelRatio||1);
+  const r=cv.getBoundingClientRect();W=r.width;H=r.height;
+  cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
+  U=Math.min(W,H*1.1)/100;PX=W*.28;
+  paper=document.createElement('canvas');paper.width=cv.width;paper.height=cv.height;
+  const p=paper.getContext('2d');p.scale(DPR,DPR);
+  p.fillStyle=PAPER;p.fillRect(0,0,W,H);
+  const gapR=Math.max(22,H/30);p.strokeStyle=RULE;p.globalAlpha=.55;p.lineWidth=1;
+  for(let y=H*.06;y<H;y+=gapR){p.beginPath();p.moveTo(0,y+.5);p.lineTo(W,y+.5);p.stroke();}
+  p.globalAlpha=.9;p.lineWidth=1.6;p.beginPath();p.moveTo(0,H*.955);p.lineTo(W,H*.955);p.stroke();
+}
+const laneLerp=(f,key)=>{const i=Math.min(1,Math.floor(f)),t=f-i;return LANES[i][key]+(LANES[i+1][key]-LANES[i][key])*t;};
+const laneY=f=>H*laneLerp(f,'y');
+const laneS=f=>laneLerp(f,'s');
+const shipW=s=>26*U*s;
+
+// ---------- drawing pieces ----------
+function ship(x,y,w,ports,cracked,smoke,rot){
+  ctx.save();ctx.translate(x,y);ctx.rotate(rot||0);
+  const k=w;pen(Math.max(1.4,w*.018));
+  // smoke first so the funnel sits over it
+  curl(.055*k,-.62*k,k*.09,smoke,-2.25);
+  wline([[.02*k,-.45*k],[.025*k,-.61*k],[.09*k,-.61*k],[.09*k,-.45*k]],true,PAPER);
+  wline([[-.12*k,-.31*k],[-.12*k,-.46*k],[.22*k,-.46*k],[.22*k,-.31*k]],true,PAPER);
+  wline([[-.50*k,-.31*k],[.54*k,-.34*k],[.38*k,.03*k],[-.30*k,.03*k],[-.40*k,-.12*k]],true,PAPER);
+  const xs=ports===3?[-.22,0,.22]:[-.12,.12];
+  xs.forEach((px,i)=>{
+    wcirc(px*k,-.15*k,.055*k);
+    if(i<cracked){pen(Math.max(1.4,w*.016),RED);const r=.04*k;
+      wline([[px*k-r,-.15*k-r],[px*k+r,-.15*k+r]]);wline([[px*k+r,-.15*k-r],[px*k-r,-.15*k+r]]);pen(Math.max(1.4,w*.018));}
+  });
+  ctx.restore();
+}
+function fin(x,y,s){
+  const hgt=U*6*s,b=U*4.5*s;pen(1.2+1.2*s);
+  wline([[x-b*.5,y],[x+b*.05,y-hgt],[x+b*.45,y]],false,PAPER);
+  for(let i=1;i<=4;i++){const t=i/5;const ex=x+b*.05+(b*.4)*t,ey=y-hgt+hgt*t;wline([[ex,ey],[ex-b*.18,ey+hgt*.12]]);}
+  wline([[x-b*1.5,y],[x-b*1.25,y-hgt*.14],[x-b*1.1,y],[x-b*.85,y-hgt*.12],[x-b*.65,y]]);
+  wline([[x+b*.6,y],[x+b*.85,y-hgt*.12],[x+b,y],[x+b*1.25,y-hgt*.14],[x+b*1.45,y]]);
+}
+function bigWave(x,y,s){
+  const hgt=U*8*s,b=U*5*s;pen(1.4+1.4*s);
+  wline([[x-b*1.3,y],[x-b*.55,y-hgt*.6],[x-b*.3,y-hgt*.15],[x+b*.3,y-hgt],[x+b*.62,y-hgt*.82],[x+b*.48,y-hgt*.6],[x+b*.62,y-hgt*.5],[x+b*1.1,y]],false,PAPER);
+  curl(x+b*.4,y-hgt*1.05,U*1.6*s,1.6,-.4);
+}
+function coal(x,y,s){
+  const r=U*3.5*s;pen(1.2+1.2*s);
+  wline([[x-r,y],[x-r*.85,y-r*1.35],[x-r*.3,y-r*1.6],[x-r*.25,y-r*1.95],[x+r*.25,y-r*1.95],[x+r*.3,y-r*1.6],[x+r*.85,y-r*1.35],[x+r,y]],true,PAPER);
+  wline([[x-r*.35,y-r*1.62],[x+r*.35,y-r*1.62]]);
+  txt('COAL',x,y-r*.7,r*.62);
+}
+function waveLine(li){
+  const L=LANES[li],y=H*L.y,s=L.s,wl=U*9*s,amp=U*1.3*s,off=(scroll*s)%wl,pts=[];
+  for(let x=-off-wl;x<W+wl;x+=wl)pts.push([x,y+amp*.3],[x+wl*.62,y-amp],[x+wl*.78,y-amp*.15]);
+  pen(.6+1.6*s);wline(pts,false);
+}
+function cloud(cx,cy,r){
+  const pts=[],n=26;
+  for(let i=0;i<n;i++){const a=i/n*6.283,top=a>Math.PI;
+    const bump=top?1+.24*Math.abs(Math.sin((a-Math.PI)*2.5)):1+.06*Math.abs(Math.sin(a*2));
+    pts.push([cx+Math.cos(a)*r*1.5*bump,cy+Math.sin(a)*r*.75*bump*(top?1.15:.8)]);}
+  pen(1.6);wline(pts,true,PAPER);
+  ctx.beginPath();for(let i=0;i<=40;i++){const t=i/40*4*Math.PI,rr=r*.05+t*r*.035;const X=cx+r*.35+Math.cos(t)*rr+J()*.4,Y=cy+r*.1+Math.sin(t)*rr+J()*.4;i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);}ctx.stroke();
+}
+function sun(p){
+  const r=6*U,x=W*.12,y=H*.09+(H*HOR+r*1.3-H*.09)*Math.pow(p,1.4);
+  ctx.save();ctx.beginPath();ctx.rect(0,0,W,H*HOR);ctx.clip();
+  pen(1.8);wcirc(x,y,r,PAPER);
+  for(const a of[-2.7,-2.05,-1.4,-.75,-.1,.55]){const c=Math.cos(a),s=Math.sin(a);wline([[x+c*r*1.4,y+s*r*1.4],[x+c*r*1.85,y+s*r*1.85]]);}
+  ctx.restore();
+}
+function dusk(p){
+  const a=Math.max(0,(p-.55)/.45);if(a<=0)return;
+  ctx.save();ctx.beginPath();ctx.rect(0,0,W,H*HOR);ctx.clip();
+  ctx.globalAlpha=a*.55;pen(1.1);const sp=Math.max(9,U*1.6),hh=H*HOR;
+  for(let x=0;x<W+hh;x+=sp){ctx.beginPath();ctx.moveTo(x+J(),J());ctx.lineTo(x-hh*.6+J(),hh+J());ctx.stroke();}
+  ctx.restore();
+}
+function card(w,hh){
+  const x=(W-w)/2,y=(H-hh)/2;pen(2);
+  wline([[x,y],[x+w,y+2],[x+w-2,y+hh],[x+2,y+hh-2]],true,'rgba(250,247,214,.97)');
+  pen(1.6);ctx.globalAlpha=.6;wline([[x+w*.42,y-8],[x+w*.58,y-6],[x+w*.58,y+10],[x+w*.42,y+8]],true,'rgba(255,255,255,.6)');ctx.globalAlpha=1;
+  return{x,y};
+}
+
+// ---------- game ----------
+function reset(){gap=START_GAP;v=BASE_V;boostT=0;hull=3;lane=2;laneF=2;obs=[];fx=[];spawnT=1.4;elapsed=0;shake=0;}
+reset();
+function start(){reset();state='play';}
+function end(kind){
+  state='end';lastEnd=performance.now();endInfo={kind,spare:SUN_T-elapsed,gap:Math.max(0,gap),elapsed};
+  if(kind==='win'){fx.push({x:PX+U*6,y:H*HOR-U*8,s:'TOOT TOOT!',t:0,c:INK,big:1});
+    if(best===null||endInfo.spare>best){best=endInfo.spare;endInfo.record=true;try{localStorage.setItem('steamchase.best',JSON.stringify(best));}catch(e){}}}
+}
+function spawn(){
+  const r=Math.random(),type=r<.5?'shark':r<.75?'wave':'coal',l=Math.random()*3|0;
+  obs.push({type,lane:l,x:W+U*12,ph:Math.random()*6});
+  if(elapsed>20&&type==='shark'&&Math.random()<.35){const l2=(l+1+(Math.random()*2|0))%3;obs.push({type:'shark',lane:l2,x:W+U*20,ph:Math.random()*6});}
+}
+function pop(s,c){fx.push({x:PX,y:laneY(laneF)-shipW(laneS(laneF))*.6,s,t:0,c});}
+function update(dt){
+  const sp=(state==='play'?v:7)*U*2;
+  scroll+=sp*dt;
+  for(const c of clouds){c.fx-=sp*.12*dt/W;if(c.fx<-.15){c.fx=1.15;c.fy=.06+Math.random()*.16;c.r=.7+Math.random()*.6;}}
+  for(const f of fx)f.t+=dt;fx=fx.filter(f=>f.t<1.3);
+  shake=Math.max(0,shake-dt);
+  if(state!=='play')return;
+  elapsed+=dt;
+  if(boostT>0){boostT-=dt;v+=(BOOST_V-v)*Math.min(1,dt*4);}
+  else{const d=BASE_V-v;v+=Math.sign(d)*Math.min(Math.abs(d),dt*(d>0?5:4));}
+  gap-=(v-RIVAL_V)*dt;
+  laneF+=(lane-laneF)*Math.min(1,dt*9);
+  spawnT-=dt;if(spawnT<=0){spawn();spawnT=Math.max(.55,1.25-elapsed*.009)*(.7+Math.random()*.6);}
+  const pl=Math.round(laneF),settled=Math.abs(laneF-pl)<.3,w=shipW(laneS(laneF));
+  for(const o of obs){
+    const s=LANES[o.lane].s;o.x-=sp*s*dt;
+    if(o.hit||o.lane!==pl||!settled)continue;
+    const r=(o.type==='shark'?4:o.type==='wave'?5:3.5)*U*s;
+    if(Math.abs(o.x-PX)<w*.42+r){
+      o.hit=true;
+      if(o.type==='shark'){hull--;v=3;shake=.35;pop('CHOMP!',RED);}
+      else if(o.type==='wave'){v=Math.min(v,5);shake=.2;pop('SPLOSH!',RED);}
+      else{o.gone=true;boostT=Math.min(6,boostT+3);pop('FULL STEAM!',INK);}
+    }
+  }
+  obs=obs.filter(o=>o.x>-U*20&&!o.gone);
+  if(hull<=0)end('sunk');else if(gap<=0)end('win');else if(elapsed>=SUN_T)end('dark');
+}
+
+function draw(){
+  tick=Math.floor(time*8);sc=0;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.save();
+  if(shake>0)ctx.translate((Math.random()-.5)*shake*U*6,(Math.random()-.5)*shake*U*6);
+  ctx.drawImage(paper,0,0,W,H);
+  const p=state==='play'?elapsed/SUN_T:state==='end'?Math.min(1,endInfo.elapsed/SUN_T):.12;
+  dusk(p);sun(p);
+  for(const c of clouds)cloud(c.fx*W,c.fy*H,c.r*U*5);
+  pen(1.6);wline([[-10,H*HOR],[W+10,H*HOR]]);
+  // rival steamer on the horizon
+  const g=state==='title'?60:Math.max(0,gap),rx=PX+g*(W*.7/60);
+  if(rx<W+U*10)ship(rx,H*HOR-U*.2,shipW(.42),2,0,2,Math.sin(time*1.6+1)*.03);
+  // lanes, far to near
+  const pl=Math.round(laneF),pw=shipW(laneS(laneF));
+  for(let li=0;li<3;li++){
+    const L=LANES[li],y=H*L.y;
+    for(const o of obs){if(o.lane!==li)continue;const bob=Math.sin(time*3+o.ph)*U*.5*L.s;
+      if(o.type==='shark')fin(o.x,y+bob,L.s);else if(o.type==='wave')bigWave(o.x,y,L.s);else coal(o.x,y+bob,L.s);}
+    if(li===pl){
+      const y0=laneY(laneF)+Math.sin(time*2.2)*pw*.012;
+      let rot=Math.sin(time*1.7)*.03+(lane-laneF)*.12;
+      if(state==='end'&&endInfo.kind==='sunk')rot+=Math.min(.35,(performance.now()-lastEnd)/3000);
+      if(boostT>0&&state==='play'){pen(1.4);for(let i=0;i<3;i++){const yy=y0-pw*(.05+i*.09),xx=PX-pw*(.62+.08*i)-(time*200%30);wline([[xx,yy],[xx-pw*.25,yy]]);}}
+      ship(PX,y0,pw,3,3-hull,boostT>0?3.5:2.2,rot);
+    }
+    waveLine(li);
+  }
+  for(const f of fx){
+    const a=1-f.t/1.3;ctx.globalAlpha=Math.max(0,a);
+    txt(f.s,f.x,f.y-f.t*U*6,Math.max(20,U*(f.big?6:4)),'center',f.c,-.08);ctx.globalAlpha=1;
+  }
+  ctx.restore();
+  if(state==='play')hud();
+  else if(state==='title')titleCard();
+  else endCard();
+}
+function fmt(s){s=Math.max(0,Math.ceil(s));return`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;}
+function hud(){
+  const f=Math.max(18,U*3.4),x=W-Math.max(14,U*2),y=Math.max(16,U*3);
+  txt(`${Math.ceil(gap)} cables to go`,x,y,f*1.15,'right');
+  const r=f*.32;pen(1.6);
+  for(let i=0;i<3;i++){const cx=x-r-i*r*2.8,cy=y+f*1.05;wcirc(cx,cy,r,PAPER);
+    if(i<3-hull){pen(1.6,RED);wline([[cx-r*.7,cy-r*.7],[cx+r*.7,cy+r*.7]]);wline([[cx+r*.7,cy-r*.7],[cx-r*.7,cy+r*.7]]);pen(1.6);}}
+  txt(`${fmt(SUN_T-elapsed)} till sundown`,x,y+f*2.05,f*.85,'right');
+}
+function titleCard(){
+  const w=Math.min(W*.88,540),hh=Math.min(H*.7,430),{x,y}=card(w,hh),cx=W/2;
+  const T=Math.min(w*.16,hh*.17);
+  txt('Steam Chase',cx,y+hh*.15,T,'center',INK,-.03);
+  pen(2);wline([[cx-w*.3,y+hh*.25],[cx-w*.1,y+hh*.245],[cx+w*.12,y+hh*.255],[cx+w*.3,y+hh*.245]]);
+  const f=Math.max(15,Math.min(T*.36,24));
+  txt('Catch the little steamer before the sun goes down.',cx,y+hh*.34,f,'center',INK);
+  const iy=y+hh*.6,sp=w/3;
+  fin(cx-sp,iy,.55);bigWave(cx,iy,.5);coal(cx+sp,iy,.55);
+  txt('holes your hull',cx-sp,iy+f*1.1,f*.85,'center',RED);
+  txt('knocks you back',cx,iy+f*1.1,f*.85,'center',RED);
+  txt('full steam!',cx+sp,iy+f*1.1,f*.85);
+  txt('Tap above your ship to steer out, below to steer in',cx,y+hh*.8,f*.85);
+  txt('— tap to cast off —',cx,y+hh*.91,f*1.15,'center',INK);
+  txt(VERSION,x+w-12,y+hh-14,Math.max(13,f*.7),'right',INK);
+  if(best!==null)txt(`best: ${fmt(best)} of daylight spare`,x+12,y+hh-14,Math.max(13,f*.7),'left',INK);
+}
+function endCard(){
+  const w=Math.min(W*.84,480),hh=Math.min(H*.5,300),{x,y}=card(w,hh),cx=W/2;
+  const T=Math.min(w*.13,hh*.2),f=Math.max(15,Math.min(T*.42,24)),k=endInfo.kind;
+  const head=k==='win'?'Caught her!':k==='dark'?"Sun's down.":'Sunk!';
+  const line=k==='win'?`with ${fmt(endInfo.spare)} of daylight to spare`:k==='dark'?`She got away by ${Math.ceil(endInfo.gap)} cables.`:`The sharks got you, ${Math.ceil(endInfo.gap)} cables short.`;
+  txt(head,cx,y+hh*.25,T,'center',k==='win'?INK:RED,-.03);
+  txt(line,cx,y+hh*.47,f);
+  if(endInfo.record)txt('new best!',cx,y+hh*.62,f,'center',RED,-.05);
+  else if(best!==null)txt(`best: ${fmt(best)} spare`,cx,y+hh*.62,f*.85);
+  if(performance.now()-lastEnd>700)txt('— tap to sail again —',cx,y+hh*.82,f*1.1);
+}
+
+// ---------- input ----------
+function steer(dir){lane=Math.max(0,Math.min(2,lane+dir));}
+function press(py){
+  if(state==='title'){start();return;}
+  if(state==='end'){if(performance.now()-lastEnd>700)start();return;}
+  const sy=laneY(laneF)-shipW(laneS(laneF))*.15;steer(py<sy?-1:1);
+}
+cv.addEventListener('pointerdown',e=>{e.preventDefault();const r=cv.getBoundingClientRect();press(e.clientY-r.top);});
+window.addEventListener('keydown',e=>{
+  if(['ArrowUp','ArrowDown',' ','Enter'].includes(e.key))e.preventDefault();
+  if(state!=='play'){if(e.key===' '||e.key==='Enter')press(0);return;}
+  if(e.key==='ArrowUp'||e.key==='w')steer(-1);
+  if(e.key==='ArrowDown'||e.key==='s')steer(1);
+});
+window.addEventListener('resize',resize);
+
+let last=performance.now();
+function frame(now){const dt=Math.min(.05,(now-last)/1000);last=now;time+=dt;update(dt);draw();requestAnimationFrame(frame);}
+resize();requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
